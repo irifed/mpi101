@@ -4,9 +4,6 @@
 // <m>, <n> and <k> must be dividable by sqrt(<number of procs>)
 // NOTE: current version of program works with square matrices only
 // <m> == <n> == <k>
-//
-// TODO write general description
-// TODO explain A[i*m + j] indexing of 2D matrix in C
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,11 +12,21 @@
 #include <time.h>
 #include <mpi.h>
 
+
+// if CHECK_NUMERICS is defined, program will gather global matrix C
+// calculated by SUMMA to root processor and compare it with 
+// C_naive, calculated by naive matrix multiply algorithm.
+// Use for algorithm debugging only:
+// very large matrices will not fit single cpu memory.
 #define CHECK_NUMERICS
-//#define DEBUG
 
 // tolerance for validation of matrix multiplication
 #define TOL 1e-4
+
+// Init matrix with non-random numbers: each local matrix
+// will contain elements equal to processor's rank.
+// Use for algorithm debugging only.
+//#define DEBUG
 
 // global matrices size
 // A[m,n], B[n,k], C[m,k]
@@ -27,6 +34,7 @@ int m;
 int n;
 int k;
 
+// each processor will keep its rank in `myrank`
 int myrank;
 
 void init_matrix(double *matr, const int rows, const int cols) {
@@ -62,6 +70,10 @@ void print_matrix(const int rows, const int cols, const double *matr) {
     
 }
 
+
+// naive algorithm for matrix multiplication
+// non-parallel!
+// used by root processor to verify result of parallel algorithm
 // C[m,k] = A[m,n] * B[n,k]
 void matmul_naive(const int m, const int n, const int k, 
         const double *A, const double *B, double *C) {
@@ -96,6 +108,11 @@ double validate(const int m, const int n, const double *Csumma, double *Cnaive) 
     return eps;
 }
 
+
+// You don't need to modify any code in this function.
+// It is prepared for you by TA to save your time.
+// We encourage you to look through this function and understand how it works.
+//
 // gather global matrix from all processors in a 2D proc grid 
 // needed for debugging and numeric validation only
 // never happens in real life in production runs because global matrix does not fit any single proc memory
@@ -138,6 +155,8 @@ void gather_glob(const int mb, const int nb, const double *A_loc, const int m, c
     free(A_tmp);
 }
 
+// Local matrix addition
+// C = A + B
 void plus_matrix(const int m, const int n, double *A, double *B, double *C) {
     for (int i = 0; i < m; ++i) {
         for (int j = 0; j < n; ++j) {
@@ -181,30 +200,57 @@ void SUMMA(MPI_Comm comm_cart, const int mb, const int nb, const int kb, double 
     // C_loc = 0.0
     memset(C_loc, 0, mb*kb*sizeof(double));
 
+
     int nblks = n / nb;
-    for (int bcast_root = 0; bcast_root < nblks; ++bcast_root) {
+    // ======== YOUR CODE HERE ============================
+    // Implement main SUMMA loop here: 
+    // root column (or row) should loop though nblks columns (rows).
+    //
+    // If processor's column coordinate equals to root, it should broadcast
+    // its local portion of A within its `row_comm` communicator.
+    //
+    // If processor's row coordinate equals to root, it should broadcast
+    // its local portion of B within its `col_comm` communicator.
+    //
+    // After broadcasting, call multiply_naive to multiply local portions
+    // which each processor have received from others 
+    // and store it in partial sum `C_loc_tmp`.
+    //
+    // Finally, accumulate partials sums of `C_loc_tmp` to `C_loc` on each iteration
+    // using `plus_matrix` function.
+    //
+    // Tip: MPI_Bcast function uses same pointer to buffer on all processors,
+    // but initially on root processor it contains necessary data, and receivers will
+    // get data during MPI_Bcast. Be sure not to overwrite each proc's local matrix
+    // during these operations. This is why we saved local parts in 
+    // `A_loc_save` and `B_loc_save` in advance.
+    //
+    //
+    // Sample solution:
+    // for (int bcast_root = 0; bcast_root < nblks; ++bcast_root) {
+    //
+    //    int root_col = bcast_root;
+    //    int root_row = bcast_root;
+    //
+    //    // owner of A_loc[root_col,:] will broadcast its block within row comm
+    //    if (my_col == root_col) {
+    //        // copy A_loc_save to A_loc
+    //    }
+    //    // broadcast A_loc from root_col within row_comm
+    //
+    //    // owner of B_loc[:,root_row] will broadcast its block within col comm
+    //    if (my_row == root_row) {
+    //        // copy B_loc_cave to B_loc
+    //    }
+    //    // broadcast B_loc from root_row within col_comm
+    //
+    //    // multiply local blocks A_loc, B_loc using matmul_naive
+    //    // and store in C_loc_tmp
+    //
+    //    // C_loc = C_loc + C_loc_tmp using plus_matrix
+    //}
+    // ====================================================
 
-        int root_col = bcast_root;
-        int root_row = bcast_root;
-    
-        // owner of A_loc[root_col,:] will broadcast its block within row comm
-        if (my_col == root_col) {
-            memcpy(A_loc, A_loc_save, mb*nb*sizeof(double));
-        }
-        MPI_Bcast(A_loc, mb*nb, MPI_DOUBLE, root_col, row_comm);
-
-        // owner of B_loc[:,root_row] will broadcast its block within col comm
-        if (my_row == root_row) {
-            memcpy(B_loc, B_loc_save, nb*kb*sizeof(double));
-        }
-        MPI_Bcast(B_loc, nb*kb, MPI_DOUBLE, root_row, col_comm);
-
-        // multiply local blocks using naive algorithm
-        matmul_naive(mb, nb, kb, A_loc, B_loc, C_loc_tmp);
-
-        // C_loc = C_loc + C_loc_tmp
-        plus_matrix(mb, kb, C_loc_tmp, C_loc, C_loc);
-    }
 
     free(A_loc_save);
     free(B_loc_save);
@@ -250,7 +296,8 @@ int main(int argc, char *argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
     parse_cmdline(argc, argv);
 
-    // assume for simplicity that nprocs is perfect square
+    // assume for SUMMA simplicity that nprocs is perfect square
+    // and allow only this nproc
     int nprocs;
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 
@@ -261,12 +308,24 @@ int main(int argc, char *argv[]) {
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
+    // create 2D cartesian communicator from `nprocs` procs
     int ndims = 2;
-    const int dims[] = {n_proc_rows, n_proc_cols};
-    const int periods[] = {0, 0};
+    const int dims[2];
+    const int periods[2] = {0, 0};
     int reorder = 0;
     MPI_Comm comm_cart;
-    MPI_Cart_create(MPI_COMM_WORLD, ndims, dims, periods, reorder, &comm_cart);
+    // ======== YOUR CODE HERE ============================
+    // Create 2D cartesian communicator using MPI_Cart_Create function
+    // MPI_COMM_WORLD is your initial communicator
+    // We do not need periodicity in dimensions for SUMMA, so we set periods to 0.
+    // We also do not need to reorder ranking, so we set reorder to 0 too.
+    //
+    // Dimensions of the new communicator should be [n_proc_rows, n_proc_cols].
+    // New communicator with Cartesian topology should be assigned to
+    // variable `comm_cart`.
+    //
+    // MPI_Cart_create(... YOUR CODE HERE ...);
+    // ====================================================
 
 
     // assume for simplicity that matrix dims are dividable by proc grid size
@@ -287,7 +346,7 @@ int main(int argc, char *argv[]) {
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
-    // allocate matrices A_loc, B_loc, C_loc
+    // each processor allocates memory for local portions of A, B and C
     double *A_loc = NULL;
     double *B_loc = NULL;
     double *C_loc = NULL;
@@ -321,14 +380,29 @@ int main(int argc, char *argv[]) {
     gather_glob(nb, kb, B_loc, n, k, B_glob);
 #endif
 
+    // call SUMMA and measure execution time using tstart, tend
     double tstart, tend;
     tstart = MPI_Wtime();
+
+    // You should implement SUMMA algorithm in SUMMA function.
+    // SUMMA stub function is in this file (see above).
     SUMMA(comm_cart, mb, nb, kb, A_loc, B_loc, C_loc);
+
     tend = MPI_Wtime();
 
+    // Each processor will spend different time doing its 
+    // portion of work in SUMMA algorithm. To understand how long did 
+    // SUMMA execution take overall we should find time of the slowest processor.
+    // We should be using MPI_Reduce function with MPI_MAX operation
     double etime = tend - tstart;
     double max_etime = 0.0;
-    MPI_Reduce(&etime, &max_etime, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    
+    // ======== YOUR CODE HERE ============================
+    // Determine maximum value of `etime` across all processors in MPI_COMM_WORLD
+    // and save it in `max_etime` variable on root processor (rank 0).
+    // Use MPI_Reduce function and MPI_MAX operation.
+    // MPI_Reduce(... YOUR CODE HERE ...);
+    // ====================================================
     if (myrank == 0) {
         printf("SUMMA took %f sec\n", max_etime);
     }
